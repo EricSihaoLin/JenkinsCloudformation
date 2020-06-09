@@ -1,0 +1,349 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation template for spinning up a HA, self-healing single-master Jenkins cluster 
+
+Parameters: 
+  AllowedSSHRange:
+    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
+    Default: 0.0.0.0/0
+    Description: Your allowed SSH IP range (eg NYU 128.122.0.0/16).
+    Type: String
+  KeyPair:
+    Description: Keypair you will use to ssh in to jenkins nodes.
+    Type: 'AWS::EC2::KeyPair::KeyName'
+  MasterInstanceType: 
+    Type: String
+    Default: t2.micro
+    AllowedValues: 
+      - t2.micro
+      - t2.large
+      - m3.medium
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+    Description: Instance type for the master node (according to AWS, m4.large is the best value/performance choice).
+  
+  MasterAMI: 
+    Type: String
+    Default: ami-02ea8f348fa28c108
+    Description: Instance AMI for the master node (default one is free tier eligible).
+
+  MasterDetailedMonitoring:
+    Type: String
+    Default: false
+    AllowedValues: 
+      - false
+      - true
+    Description: Specifies whether detailed monitoring is enabled for the master instance.
+
+  MasterEBSVolumeSize:
+    Type: Number
+    Default: 16
+    Description: Specifies the EBS volume size of the master instance.
+
+  MasterEFSEncrypted:
+    Type: String
+    Default: false
+    AllowedValues: 
+      - false
+      - true
+    Description: Encryption of the Master's EFS drive storing JENKINS_HOME.
+
+Resources: 
+  
+  #---------- Security Groups ----------
+
+  JenkinsMasterSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Rules that controls traffic to Jenkins UI & nodes
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp:
+            Ref: AllowedSSHRange
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+  JenkinsMasterInboundRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - ALBSecGroup
+        - GroupId
+      GroupId:
+        Fn::GetAtt:
+        - JenkinsMasterSecGroup
+        - GroupId
+  JenkinsMasterInboundRule2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - ALBSecGroup
+        - GroupId
+      GroupId:
+        Fn::GetAtt:
+        - JenkinsMasterSecGroup
+        - GroupId
+  JenkinsMasterInboundRule3:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - ALBSecGroup
+        - GroupId
+      GroupId:
+        Fn::GetAtt:
+        - JenkinsMasterSecGroup
+        - GroupId
+
+  JenkinsSlaveSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Rules for worker nodes
+      VpcId:
+        Ref: VPC
+  JenkinsSlaveInboundRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - JenkinsMasterSecGroup
+        - GroupId
+      GroupId:
+        Fn::GetAtt:
+        - JenkinsSlaveSecGroup
+        - GroupId
+
+  MountTargetSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for mount target
+      VpcId:
+        Ref: VPC
+  MountTargetInboundRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId:
+        Fn::GetAtt:
+        - JenkinsMasterSecGroup
+        - GroupId
+      GroupId:
+        Fn::GetAtt:
+        - MountTargetSecurityGroup
+        - GroupId
+
+  ALBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Rules that controls allowed ALB traffic
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  #---------- Auto Scaling ----------
+
+  JenkinsLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId:
+        Ref: MasterAMI
+      SecurityGroups: 
+        - Ref: JenkinsMasterSecGroup
+      InstanceType: 
+        Ref: MasterInstanceType
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda    
+          Ebs: 
+            VolumeType: gp2
+            VolumeSize:
+              Ref: MasterEBSVolumeSize
+      KeyName:
+        Ref: KeyPair
+      AssociatePublicIpAddress: true 
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash -ex
+              sudo yum update -y
+              sudo yum install java-1.8.0 -y
+              echo "Java installed" > status.txt
+              mkdir -p /mnt/JENKINS_HOME
+              mount -t nfs4 -o nfsvers=4.1 $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone).${DNS}:/ /mnt/JENKINS_HOME
+              echo "nfs4 mounted" >> status.txt
+              sudo wget -O /etc/yum.repos.d/jenkins.repo http://pkg.jenkins-ci.org/redhat/jenkins.repo
+              sudo rpm --import https://jenkins-ci.org/redhat/jenkins-ci.org.key
+              sudo yum install jenkins -y
+              echo "Jenkins installed" >> status.txt
+              sudo chown jenkins:jenkins /mnt/JENKINS_HOME
+              sudo sed -i 's/\/var\/lib\/jenkins/\/mnt\/JENKINS_HOME/g' /etc/sysconfig/jenkins
+              echo "$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone).${DNS}:/ /mnt/JENKINS_HOME nfsdefaults,vers=4.1 0 0" >> /etc/fstab
+              sudo service jenkins start
+              echo "Jenkins started" >> status.txt
+            - DNS: !Join [ '.', [ !Ref JenkinsEFS , 'efs', !Ref 'AWS::Region', 'amazonaws', 'com' ]]
+              Region: !Ref AWS::Region
+  
+  JenkinsAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn:
+      - MountTargetA
+      - MountTargetB
+    Properties:
+      AvailabilityZones:
+      - !Join
+        - ''
+        - - !Ref 'AWS::Region'
+          - 'a'
+      - !Join
+        - ''
+        - - !Ref 'AWS::Region'
+          - 'b'
+      LaunchConfigurationName:
+        Ref: JenkinsLaunchConfig
+      VPCZoneIdentifier:
+        - Ref: PublicSubnetA
+        - Ref: PublicSubnetB
+      MinSize: 1
+      MaxSize: 1
+      TargetGroupARNs:
+        - Ref: ALBTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: Jenkins Master
+          PropagateAtLaunch: true
+        - Key: Stack
+          Value: 
+            Ref: AWS::StackName
+          PropagateAtLaunch: true
+  
+#---------- EFS ----------
+
+  JenkinsEFS:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted:
+        Ref: MasterEFSEncrypted
+      FileSystemTags:
+        - Key: Name
+          Value: Jenkins EFS
+  
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId:
+        Ref: JenkinsEFS
+      SubnetId:
+        Ref: PrivateSubnetA
+      SecurityGroups:
+        - Ref: MountTargetSecurityGroup
+  
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId:
+        Ref: JenkinsEFS
+      SubnetId:
+        Ref: PrivateSubnetB
+      SecurityGroups:
+        - Ref: MountTargetSecurityGroup
+
+#---------- Application Load Balancer ----------
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: 
+        - Ref: PublicSubnetA
+        - Ref: PublicSubnetB
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: 50
+      SecurityGroups:
+        - Ref: ALBSecGroup
+      Tags:
+        - Key: Name
+          Value: Jenkins ALB
+        - Key: Stack
+          Value: 
+            Ref: AWS::StackName
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 4
+      HealthCheckPath: '/robots.txt'
+      Matcher:
+        HttpCode: 200
+      Name: Jenkins
+      Port: 8080
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 20
+      UnhealthyThresholdCount: 3
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: Jenkins TargetGroup
+      - Key: Stack
+        Value: 
+          Ref: AWS::StackName
+    
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: ALBTargetGroup
+      LoadBalancerArn:
+        Ref: ALB
+      Port: 80
+      Protocol: HTTP
+
+Outputs:
+  LoadBalancerDNSName:
+    Description: The DNSName of the ALB
+    Value: !GetAtt ALB.DNSName
+
+Metadata: {}
+Mappings: {}
+Conditions: {}
