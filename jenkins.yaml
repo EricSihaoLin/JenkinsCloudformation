@@ -7,6 +7,22 @@ Parameters:
     Default: 0.0.0.0/0
     Description: Your allowed SSH IP range (eg NYU 128.122.0.0/16).
     Type: String
+  VPCID:
+    Default: vpc-c3474ca5
+    Description: The VPC ID that this will deploy in
+    Type: AWS::EC2::VPC::Id
+  VPCSubnetA:
+    Default: subnet-94f22ddc
+    Description: The Subnet A of VPC
+    Type: AWS::EC2::Subnet::Id
+  VPCSubnetB:
+    Default: subnet-94f22ddc
+    Description: The Subnet B of VPC
+    Type: AWS::EC2::Subnet::Id
+  VPCSubnetC:
+    Default: subnet-94f22ddc
+    Description: The Subnet C of VPC
+    Type: AWS::EC2::Subnet::Id
   KeyPair:
     Description: Keypair you will use to ssh in to jenkins nodes.
     Type: 'AWS::EC2::KeyPair::KeyName'
@@ -24,7 +40,7 @@ Parameters:
   
   MasterAMI: 
     Type: String
-    Default: ami-02ea8f348fa28c108
+    Default: ami-098f16afa9edf40be
     Description: Instance AMI for the master node (default one is free tier eligible).
 
   MasterDetailedMonitoring:
@@ -56,8 +72,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Rules that controls traffic to Jenkins UI & nodes
-      VpcId:
-        Ref: VPC
+      VpcId: !Ref VPCID
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 22
@@ -114,8 +129,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Rules for worker nodes
-      VpcId:
-        Ref: VPC
+      VpcId: !Ref VPCID
   JenkinsSlaveInboundRule:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -135,8 +149,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security group for mount target
-      VpcId:
-        Ref: VPC
+      VpcId: !Ref VPCID
   MountTargetInboundRule:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -156,8 +169,7 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Rules that controls allowed ALB traffic
-      VpcId:
-        Ref: VPC
+      VpcId: !Ref VPCID
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 80
@@ -229,11 +241,16 @@ Resources:
         - ''
         - - !Ref 'AWS::Region'
           - 'b'
+      - !Join
+        - ''
+        - - !Ref 'AWS::Region'
+          - 'c'
       LaunchConfigurationName:
         Ref: JenkinsLaunchConfig
       VPCZoneIdentifier:
-        - Ref: PublicSubnetA
-        - Ref: PublicSubnetB
+        - !Ref VPCSubnetA
+        - !Ref VPCSubnetB
+        - !Ref VPCSubnetC
       MinSize: 1
       MaxSize: 1
       TargetGroupARNs:
@@ -318,8 +335,7 @@ Resources:
         - Key: deregistration_delay.timeout_seconds
           Value: 20
       UnhealthyThresholdCount: 3
-      VpcId:
-        Ref: VPC
+      VpcId: !Ref VPCID
       Tags:
       - Key: Name
         Value: Jenkins TargetGroup
