@@ -1,365 +1,250 @@
-AWSTemplateFormatVersion: 2010-09-09
-Description: CloudFormation template for spinning up a HA, self-healing single-master Jenkins cluster 
-
-Parameters: 
-  AllowedSSHRange:
-    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/\d{1,2}'
-    Default: 0.0.0.0/0
-    Description: Your allowed SSH IP range (eg NYU 128.122.0.0/16).
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AWS CloudFormation Jenkins Template (not highly available)
+Parameters:
+  InstanceType:
+    Description: Type of EC2 instance to launch for the server. Only Compute type nodes are currently specified.
     Type: String
-  VPCID:
-    Default: vpc-c3474ca5
-    Description: The VPC ID that this will deploy in
-    Type: AWS::EC2::VPC::Id
-  VPCSubnetA:
-    Default: subnet-94f22ddc
-    Description: The Subnet A of VPC
-    Type: AWS::EC2::Subnet::Id
-  VPCSubnetB:
-    Default: subnet-94f22ddc
-    Description: The Subnet B of VPC
-    Type: AWS::EC2::Subnet::Id
-  VPCSubnetC:
-    Default: subnet-94f22ddc
-    Description: The Subnet C of VPC
-    Type: AWS::EC2::Subnet::Id
-  KeyPair:
-    Description: Keypair you will use to ssh in to jenkins nodes.
-    Type: 'AWS::EC2::KeyPair::KeyName'
-  MasterInstanceType: 
-    Type: String
-    Default: t2.micro
+    Default: t2.medium
+    ConstraintDescription: Must be a valid EC2 instance type
     AllowedValues: 
+      - t2.nano
       - t2.micro
+      - t2.small
+      - t2.medium
       - t2.large
-      - m3.medium
+      - t2.xlarge
+      - t2.2xlarge
       - m4.large
       - m4.xlarge
       - m4.2xlarge
-    Description: Instance type for the master node (according to AWS, m4.large is the best value/performance choice).
-  
-  MasterAMI: 
+      - m4.4xlarge
+      - m4.10xlarge
+      - m4.16xlarge
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+      - m5.12xlarge
+      - m5.24xlarge
+  VpcId:
+    Description: VPC ID that this stack will be launched in.
+    Type: AWS::EC2::VPC::Id
+    AllowedPattern: "[a-z0-9-]*"
+  SubnetId:
+    Description: VPC Subnet that this stack will be launched in.
+    Type: AWS::EC2::Subnet::Id
+    AllowedPattern: "[a-z0-9-]*"
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance(s).
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair
+  SSHLocation:
+    Description: The source IP address (/32) or source IP address range (x.x.x.x/x) that will be allowed to SSH to the EC2 instances
     Type: String
-    Default: ami-098f16afa9edf40be
-    Description: Instance AMI for the master node (default one is free tier eligible).
-
-  MasterDetailedMonitoring:
-    Type: String
-    Default: false
-    AllowedValues: 
-      - false
-      - true
-    Description: Specifies whether detailed monitoring is enabled for the master instance.
-
-  MasterEBSVolumeSize:
+    MinLength: 9
+    MaxLength: 18
+    Default: 0.0.0.0/0
+    AllowedPattern: "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})"
+    ConstraintDescription: Must be a valid IP CIDR range of the form x.x.x.x/x
+  JenkinsPort:
+    Description: The Port that will be used to access Jenkins (Must be port 1024 or above, unless changing jenkins user).
     Type: Number
-    Default: 16
-    Description: Specifies the EBS volume size of the master instance.
-
-  MasterEFSEncrypted:
+    MinValue: 1024
+    MaxValue: 65535
+    Default: 8080
+  InstanceTagName:
+    Description: Instance Name tag that will be used to define the Name of the instance resource(s)
     Type: String
-    Default: false
-    AllowedValues: 
-      - false
-      - true
-    Description: Encryption of the Master's EFS drive storing JENKINS_HOME.
+    Default: Cloudformation Jenkins
 
-Resources: 
-  
-  #---------- Security Groups ----------
+# Create an easy mapping, simply mapping the region selected to the appropriate RHEL AMI
+Mappings: 
+  RegionMap: 
+    'us-east-1': 
+      AMI: 'ami-098f16afa9edf40be'
+    'us-east-2': 
+      AMI: 'ami-0a54aef4ef3b5f881'
 
-  JenkinsMasterSecGroup:
+Resources:
+  JenkinsInstance:
+    Description: Jenkins Standalone EC2 Instance running Java 8, and Jenkins.
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        # configSets is used when there are multiple configs that you want to run, for multiple instances. If not needed then just config (default) is adequate.
+        configSets:
+          default: [mountVolume, config, jenkinsConfig]
+        # This configSet will define how we handle the additional EBS volume that we create with the Instance. We will mount the volume in /var/lib/Jenkins
+        mountVolume:
+          commands:
+            01_mkdir:
+              command: sudo mkdir -p /var/lib/jenkins
+            02_fdisk:
+              command: echo -e "o\nn\np\n1\n\n\nw" | sudo fdisk /dev/sdb
+            03_wait:
+              command: sleep 3
+            04_mkfs:
+              command: sudo mkfs.ext4 /dev/sdb1
+            05_disk_label:
+              command: e2label /dev/sdb1 JENKINS
+            06_fstab:
+              command: echo -e "LABEL=JENKINS     /var/lib/jenkins    ext4   defaults 0 0" >> /etc/fstab
+            07_mount:
+              command: mount -a
+
+        # This configSet will perform the actual installation of Jenkins
+        jenkinsConfig:
+          packages:
+            yum:
+              wget: []
+              java-1.8.0-openjdk: []
+              java-1.8.0-openjdk-devel: []
+              net-tools: []
+              git: []
+              jq: []
+          commands:
+            01_epel_repo:
+              command: sudo rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
+            02_jenkins_repo:
+              command: sudo wget -O /etc/yum.repos.d/jenkins.repo http://pkg.jenkins-ci.org/redhat/jenkins.repo
+            03_yum_clean:
+              command: yum clean all
+            04_jenkins_key:
+              command: sudo rpm --import https://jenkins-ci.org/redhat/jenkins-ci.org.key
+            05_jenkins_dirs:
+              command: sudo mkdir -p /home/jenkins /var/lib/jenkins/.ssh /var/cache/jenkins/war /var/log/jenkins
+            06_jenkins_install:
+              command: sudo yum install -y jenkins
+            07_check_jenkins_login:
+              command: usermod -s /bin/bash jenkins
+            08_set_jenkins_port:
+              command: !Sub |
+                sudo sed -i "s/JENKINS_PORT=\"8080\"/JENKINS_PORT=\"${JenkinsPort}\"/g" /etc/sysconfig/jenkins
+            09_sshconfig:
+              command: sudo echo -e "Host *\n\tStrictHostKeyChecking no\n" >> /var/lib/jenkins/.ssh/config
+            10_ssh_keygen:
+              command: sudo ssh-keygen -t rsa -b 2048 -C jenkins@jenkins -N "" -f /var/lib/jenkins/.ssh/id_rsa; sudo cat /var/lib/jenkins/.ssh/id_rsa.pub > /var/lib/jenkins/.ssh/authorized_keys
+            11_set_permissions:
+              command: sudo chown -R jenkins:jenkins /home/jenkins /var/lib/jenkins /var/cache/jenkins /var/log/jenkins; sudo chmod 0700 /var/lib/jenkins/.ssh; sudo chmod 0600 /var/lib/jenkins/.ssh/*
+            12_firewall:
+              command: !Sub |
+                sudo firewall-cmd --permanent --add-service=ssh; sudo firewall-cmd --permanent --add-port='${JenkinsPort}'/tcp; sudo firewall-cmd --reload
+          services:
+            sysvinit:
+              jenkins:
+                enabled: true
+                ensureRunning: true
+
+        # Default Config, which handles installing the firewall, and CFN components to talk back to CloudFormation
+        config:
+          packages:
+            yum:
+              firewalld: []
+          commands:
+            01_update:
+              command: yum -y update
+          files:
+            '/etc/cfn/cfn-hup.conf':
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                interval=1
+              mode: '000400'
+              owner: root
+              group: root
+            '/etc/cfn/hooks.d/cfn-auto-reloader.conf':
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.JenkinsInstance.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init --verbose --stack=${AWS::StackName} --region=${AWS::Region} --resource=JenkinsInstance
+                runas=root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - '/etc/cfn/cfn-hup.conf'
+                  - '/etc/cfn/hooks.d/cfn-auto-reloader.conf'
+              firewalld:
+                enabled: true
+                ensureRunning: true
+
+    # Properties of the Instance that we are launching. Here we define things like EBS volumes, SG's, The AMI used, etc..
+    Properties:
+      # Create the 25GB EBS volume that we will use for /var/lib/jenkins
+      BlockDeviceMappings:
+        - DeviceName: /dev/sdb
+          Ebs:
+            DeleteOnTermination: false
+            VolumeType: gp2
+            VolumeSize: 500
+      # Pull the Image or AMI from the RegionMap Map we defined earlier
+      ImageId: !FindInMap
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - AMI
+      # Pull the Intance Type, Subnet, KeyName, etc from the Parameters we defined earlier
+      InstanceType: !Ref InstanceType
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          DeleteOnTermination: true
+          SubnetId: !Ref SubnetId
+          # This defines the SG that we will place on the ENI, We will create the SG after the instance resource definition
+          GroupSet: 
+            - !Ref ServerSecurityGroup
+      KeyName: !Ref KeyName
+      Tags:
+       - Key: Name
+         Value: !Ref InstanceTagName
+      # Use the user data to instantiate the cfn service, which will report back to CloudFormaton once the instance is set up
+      UserData:
+        Fn::Base64: !Sub |     # No more Fn::Join needed
+          #!/bin/bash -x
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource JenkinsInstance --region ${AWS::Region}
+          /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource JenkinsInstance
+    # Creation Policy will ensure that if the instance isn't complete within the specified window, that a rollback will occur
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT15M
+
+  # Define the Security Group that will be appended to the ENI of the Instance we are creating.  
+  ServerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Rules that controls traffic to Jenkins UI & nodes
-      VpcId: !Ref VPCID
+      GroupDescription: Security Group that will be used for the Jenkins instance. Open ports 22, and the JenkinsPort
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
           FromPort: 22
           ToPort: 22
-          CidrIp:
-            Ref: AllowedSSHRange
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
-  JenkinsMasterInboundRule:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      IpProtocol: tcp
-      FromPort: 80
-      ToPort: 80
-      SourceSecurityGroupId:
-        Fn::GetAtt:
-        - ALBSecGroup
-        - GroupId
-      GroupId:
-        Fn::GetAtt:
-        - JenkinsMasterSecGroup
-        - GroupId
-  JenkinsMasterInboundRule2:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      IpProtocol: tcp
-      FromPort: 8080
-      ToPort: 8080
-      SourceSecurityGroupId:
-        Fn::GetAtt:
-        - ALBSecGroup
-        - GroupId
-      GroupId:
-        Fn::GetAtt:
-        - JenkinsMasterSecGroup
-        - GroupId
-  JenkinsMasterInboundRule3:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      IpProtocol: tcp
-      FromPort: 443
-      ToPort: 443
-      SourceSecurityGroupId:
-        Fn::GetAtt:
-        - ALBSecGroup
-        - GroupId
-      GroupId:
-        Fn::GetAtt:
-        - JenkinsMasterSecGroup
-        - GroupId
-
-  JenkinsSlaveSecGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Rules for worker nodes
-      VpcId: !Ref VPCID
-  JenkinsSlaveInboundRule:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      IpProtocol: tcp
-      FromPort: 22
-      ToPort: 22
-      SourceSecurityGroupId:
-        Fn::GetAtt:
-        - JenkinsMasterSecGroup
-        - GroupId
-      GroupId:
-        Fn::GetAtt:
-        - JenkinsSlaveSecGroup
-        - GroupId
-
-  MountTargetSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Security group for mount target
-      VpcId: !Ref VPCID
-  MountTargetInboundRule:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      IpProtocol: tcp
-      FromPort: 2049
-      ToPort: 2049
-      SourceSecurityGroupId:
-        Fn::GetAtt:
-        - JenkinsMasterSecGroup
-        - GroupId
-      GroupId:
-        Fn::GetAtt:
-        - MountTargetSecurityGroup
-        - GroupId
-
-  ALBSecGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Rules that controls allowed ALB traffic
-      VpcId: !Ref VPCID
-      SecurityGroupIngress:
+          CidrIp: !Ref SSHLocation
         - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-      SecurityGroupEgress:
-        - IpProtocol: -1
-          CidrIp: 0.0.0.0/0
+          FromPort: !Ref JenkinsPort
+          ToPort: !Ref JenkinsPort
+          CidrIp: !Ref SSHLocation
 
-  #---------- Auto Scaling ----------
-
-  JenkinsLaunchConfig:
-    Type: AWS::AutoScaling::LaunchConfiguration
-    Properties:
-      ImageId:
-        Ref: MasterAMI
-      SecurityGroups: 
-        - Ref: JenkinsMasterSecGroup
-      InstanceType: 
-        Ref: MasterInstanceType
-      BlockDeviceMappings:
-        - DeviceName: /dev/xvda    
-          Ebs: 
-            VolumeType: gp2
-            VolumeSize:
-              Ref: MasterEBSVolumeSize
-      KeyName:
-        Ref: KeyPair
-      AssociatePublicIpAddress: true 
-      UserData:
-        Fn::Base64:
-          Fn::Sub:
-            - |
-              #!/bin/bash -ex
-              sudo yum update -y
-              sudo yum install java-1.8.0 -y
-              echo "Java installed" > status.txt
-              mkdir -p /mnt/JENKINS_HOME
-              mount -t nfs4 -o nfsvers=4.1 $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone).${DNS}:/ /mnt/JENKINS_HOME
-              echo "nfs4 mounted" >> status.txt
-              sudo wget -O /etc/yum.repos.d/jenkins.repo http://pkg.jenkins-ci.org/redhat/jenkins.repo
-              sudo rpm --import https://jenkins-ci.org/redhat/jenkins-ci.org.key
-              sudo yum install jenkins -y
-              echo "Jenkins installed" >> status.txt
-              sudo chown jenkins:jenkins /mnt/JENKINS_HOME
-              sudo sed -i 's/\/var\/lib\/jenkins/\/mnt\/JENKINS_HOME/g' /etc/sysconfig/jenkins
-              echo "$(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone).${DNS}:/ /mnt/JENKINS_HOME nfsdefaults,vers=4.1 0 0" >> /etc/fstab
-              sudo service jenkins start
-              echo "Jenkins started" >> status.txt
-            - DNS: !Join [ '.', [ !Ref JenkinsEFS , 'efs', !Ref 'AWS::Region', 'amazonaws', 'com' ]]
-              Region: !Ref AWS::Region
-  
-  JenkinsAutoScalingGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
-    DependsOn:
-      - MountTargetA
-      - MountTargetB
-    Properties:
-      AvailabilityZones:
-      - !Join
-        - ''
-        - - !Ref 'AWS::Region'
-          - 'a'
-      - !Join
-        - ''
-        - - !Ref 'AWS::Region'
-          - 'b'
-      - !Join
-        - ''
-        - - !Ref 'AWS::Region'
-          - 'c'
-      LaunchConfigurationName:
-        Ref: JenkinsLaunchConfig
-      VPCZoneIdentifier:
-        - !Ref VPCSubnetA
-        - !Ref VPCSubnetB
-        - !Ref VPCSubnetC
-      MinSize: 1
-      MaxSize: 1
-      TargetGroupARNs:
-        - Ref: ALBTargetGroup
-      HealthCheckType: ELB
-      HealthCheckGracePeriod: 300
-      Tags:
-        - Key: Name
-          Value: Jenkins Master
-          PropagateAtLaunch: true
-        - Key: Stack
-          Value: 
-            Ref: AWS::StackName
-          PropagateAtLaunch: true
-  
-#---------- EFS ----------
-
-  JenkinsEFS:
-    Type: AWS::EFS::FileSystem
-    Properties:
-      Encrypted:
-        Ref: MasterEFSEncrypted
-      FileSystemTags:
-        - Key: Name
-          Value: Jenkins EFS
-  
-  MountTargetA:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId:
-        Ref: JenkinsEFS
-      SubnetId:
-        Ref: PrivateSubnetA
-      SecurityGroups:
-        - Ref: MountTargetSecurityGroup
-  
-  MountTargetB:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId:
-        Ref: JenkinsEFS
-      SubnetId:
-        Ref: PrivateSubnetB
-      SecurityGroups:
-        - Ref: MountTargetSecurityGroup
-
-#---------- Application Load Balancer ----------
-
-  ALB:
-    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
-    Properties:
-      Scheme: internet-facing
-      Subnets: 
-        - Ref: PublicSubnetA
-        - Ref: PublicSubnetB
-      LoadBalancerAttributes:
-        - Key: idle_timeout.timeout_seconds
-          Value: 50
-      SecurityGroups:
-        - Ref: ALBSecGroup
-      Tags:
-        - Key: Name
-          Value: Jenkins ALB
-        - Key: Stack
-          Value: 
-            Ref: AWS::StackName
-
-  ALBTargetGroup:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      HealthCheckIntervalSeconds: 30
-      HealthCheckProtocol: HTTP
-      HealthCheckTimeoutSeconds: 10
-      HealthyThresholdCount: 4
-      HealthCheckPath: '/robots.txt'
-      Matcher:
-        HttpCode: 200
-      Name: Jenkins
-      Port: 8080
-      Protocol: HTTP
-      TargetGroupAttributes:
-        - Key: deregistration_delay.timeout_seconds
-          Value: 20
-      UnhealthyThresholdCount: 3
-      VpcId: !Ref VPCID
-      Tags:
-      - Key: Name
-        Value: Jenkins TargetGroup
-      - Key: Stack
-        Value: 
-          Ref: AWS::StackName
-    
-  ALBListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      DefaultActions:
-        - Type: forward
-          TargetGroupArn:
-            Ref: ALBTargetGroup
-      LoadBalancerArn:
-        Ref: ALB
-      Port: 80
-      Protocol: HTTP
-
+# Specify any outputs for the stack.
 Outputs:
-  LoadBalancerDNSName:
-    Description: The DNSName of the ALB
-    Value: !GetAtt ALB.DNSName
-
-Metadata: {}
-Mappings: {}
-Conditions: {}
+  TemplateID:
+    Description: 'Jenkins Single Server Template'
+    Value: 'Jenkins Single Server Template'
+  PublicIp:
+    Description: 'The Public IP address of the EC2 Instance'
+    Value: !GetAtt JenkinsInstance.PublicIp
+  ServerAddress:
+    Description: 'The public DNS address for this instance'
+    Value: !GetAtt JenkinsInstance.PublicDnsName
+  JenkinsPass:
+    Description: Jenkins One Time Install Password 
+    Value: !Sub "ssh ec2-user@${JenkinsInstance.PublicIp} sudo cat /var/lib/jenkins/secrets/initialAdminPassword"
+  JenkinsKey:
+    Description: Jenkins SSH Public Key
+    Value: !Sub "ssh ec2-user@${JenkinsInstance.PublicIp} sudo cat /var/lib/jenkins/.ssh/id_rsa.pub"
+  InstanceID:
+    Description: 'The ID of the Jenkins instance that was launched'
+    Value: !Ref JenkinsInstance
